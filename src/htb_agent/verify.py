@@ -42,10 +42,17 @@ class Evidence:
     foothold: str | None = None     # confirmed 일 때 획득한 능력
     observed: str = ""              # 관측 요약 (원장용)
     probe_command: str = ""         # 무엇으로 확인했는지
+    provenance: str = ""            # 플래그 획득 경로 (아래 FLAG_* 참조)
 
     @property
     def ok(self) -> bool:
         return self.verdict == "confirmed"
+
+
+# 플래그 획득 경로 — ctf-abacus(2608.26237) 의 provenance 개념.
+# "플래그가 나타났는가"가 아니라 "어떻게 도달했는가"가 결정적이다.
+FLAG_GENUINE = "genuine"            # 익스플로잇(= 사전 Foothold) 이후 대상에서 관측
+FLAG_UNDEMONSTRATED = "undemonstrated"   # 플래그는 나왔으나 선행 익스플로잇 증거 없음
 
 
 def _call(probe: ProbeLike, command: str, timeout: int) -> RunOutput:
@@ -120,16 +127,26 @@ def confirms(probe: ProbeLike, command: str, must_contain: str,
                     observed=_tail(body), probe_command=command)
 
 
-def flag(command: str, output: str) -> Evidence:
-    """플래그 판정 — `flag.py` 형식 검증 + 출처(명령) 기록.
+def flag(command: str, output: str, earned: bool = False) -> Evidence:
+    """플래그 판정 — `flag.py` 형식 검증 + 출처(명령) 기록 + **획득 경로**.
 
     못 찾은 경우는 `refuted` 가 아니라 `inconclusive` 다. 한 번의 출력에
     플래그가 없다는 것은 가설의 반증이 아니다.
+
+    `earned` = 이 플래그 이전에 대상에서 '증명된 익스플로잇(Foothold)'이 있었는가.
+    True 면 genuine-solve, False 면 undemonstrated — 플래그는 맞지만 그걸 읽을
+    권한을 어떻게 얻었는지 증거가 없다(그냥 노출돼 있었거나, 추측/외부). 이 구분을
+    기록해야 "플래그를 실제로 공략해 얻었다"를 정직하게 주장할 수 있다(룰 2-4).
     """
     hits = scan_flags(command, output)
     if not hits:
         return Evidence("inconclusive", "출력에서 플래그 형식을 찾지 못함",
                         observed=_tail(output), probe_command=command)
     h = hits[0]
-    return Evidence("confirmed", f"{h.kind} 플래그 형식 검증 통과 (출처: {h.source})",
-                    foothold=f"flag:{h.kind}", observed=h.value, probe_command=command)
+    prov = FLAG_GENUINE if earned else FLAG_UNDEMONSTRATED
+    note = ("선행 Foothold 있음 → genuine" if earned
+            else "선행 익스플로잇 증거 없음 → undemonstrated(미증명)")
+    return Evidence("confirmed",
+                    f"{h.kind} 플래그 형식 검증 통과 (출처: {h.source}); {note}",
+                    foothold=f"flag:{h.kind}", observed=h.value,
+                    probe_command=command, provenance=prov)

@@ -69,6 +69,7 @@ class Attempt:
     seconds: float = 0.0
     foothold: str | None = None     # confirmed 일 때 획득한 능력
     coerced: str = ""               # 강등된 경우 그 사유(원래 판정 보존)
+    provenance: str = ""            # 플래그 획득 경로 (genuine/undemonstrated)
 
     def __post_init__(self) -> None:
         if self.verdict not in VERDICTS:

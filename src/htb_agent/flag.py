@@ -31,6 +31,7 @@ class FlagHit:
     value: str
     kind: str          # user / root / unknown
     source: str        # 발견된 명령
+    provenance: str = ""   # genuine / undemonstrated (ctf-abacus 획득경로)
 
 
 def extract_flags(text: str, require_fmt: bool = False) -> list[str]:

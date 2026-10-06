@@ -38,7 +38,9 @@ from .tiering import tier_for
 from .exploit_loop import ExploitLoop, Gate
 from .attempt import Ledger
 from .generators import make_llm_generator, make_flag_generator
+from .clues import ClueStore
 from .flag import FlagHit as _FlagHit
+from .verify import FLAG_GENUINE as _FLAG_GENUINE, FLAG_UNDEMONSTRATED as _FLAG_UNDEMONSTRATED
 from .flag import FlagHit, scan as scan_flags
 from .state import SessionState, StateStore, host_to_dict, host_from_dict
 from .tools.runner import Runner
@@ -130,6 +132,10 @@ class OrchestrationReport:
             lines.append("\n## 🚩 플래그 (FLAG)")
             lines.append(f"  user.txt: {self.user_flag or '미획득'}")
             lines.append(f"  root.txt: {self.root_flag or '미획득'}")
+            # 획득 경로 — undemonstrated 는 '플래그는 맞지만 공략 증거 없음'. 정직하게 표시.
+            for f in self.flags:
+                if f.provenance == "undemonstrated":
+                    lines.append(f"  ⚠️ {f.kind}: 미증명(undemonstrated) — 선행 익스플로잇 증거 없음")
             for f in self.flags:
                 if f.kind == "unknown":
                     lines.append(f"  (미분류) {f.value} ← {f.source}")
@@ -179,6 +185,7 @@ class Orchestrator:
         self.exploit_timebox = exploit_timebox
         self.exploit_attempt_timebox = exploit_attempt_timebox
         self._ledger: Ledger | None = None       # run() 마다 새로, 익스플로잇 단계 공유
+        self._clues = ClueStore()                 # 환경 단서 누적(교차단계 재사용)
         # 도구 설치 여부 판단(주입 가능 — 테스트에서 대체)
         self.is_tool_available = is_tool_available or (lambda b: shutil.which(b) is not None)
 
@@ -383,6 +390,11 @@ class Orchestrator:
                           prof: ProfileResult, target: str, phase: str) -> list:
         """후보 생성원 구성. 기존 도구를 고르는 LLM + 결정적 플래그 캡처."""
         gens = []
+        # 누적 관측에서 단서 수집(교차단계 재사용) — 생성 직전에 최신화
+        for f in report.enum_findings + report.llm_findings:
+            self._clues.harvest(f.output)
+        for b in self._banners(host):
+            self._clues.harvest(b)
         if self.llm_router is not None:
             services = [p.service for p in host.ports if p.state == "open" and p.service]
             recs = self.kb.query(prof.os_class.value, host.open_ports, services, phase=phase)
@@ -397,6 +409,7 @@ class Orchestrator:
                 "cve": [f"{m.name}: {', '.join(m.cve)} → {', '.join(m.suggest)}"
                         for m in matches[:5]],
                 "creds": [c.label() for c in (self.vault.creds if self.vault else [])][:5],
+                "clues": self._clues.context_lines(),
             }
             gens.append(make_llm_generator(self.llm_router, base_context, target, phase))
         # 플래그 캡처는 LLM 유무와 무관하게(자격증명/셸이 있으면) 돈다
@@ -425,6 +438,8 @@ class Orchestrator:
         self.audit.event("exploit_phase_start", phase=phase)
         result = loop.run()
         report.exploit_report = result.report(known_surfaces=self._known_surfaces(host))
+        for a in self._ledger.attempts():      # 루프 관측에서 단서 수집(다음 단계용)
+            self._clues.harvest(a.observed)
 
         for fh in result.footholds:
             if not fh.startswith("flag:") and fh not in report.footholds:
@@ -437,7 +452,8 @@ class Orchestrator:
                 if val and val not in known_vals:
                     known_vals.add(val)
                     report.flags.append(_FlagHit(value=val, kind=a.foothold.split(":", 1)[1],
-                                                 source=a.commands[0] if a.commands else phase))
+                                                 source=a.commands[0] if a.commands else phase,
+                                                 provenance=a.provenance))
         self.audit.event("exploit_phase_end", phase=phase,
                          attempts=len(self._ledger.attempts()) - before,
                          footholds=report.footholds, flags=[f.kind for f in report.flags])
@@ -499,9 +515,14 @@ class Orchestrator:
         finding.output = summarize_tool_output(cmd, out.stdout, out.stderr)
         self.audit.event("executed", cmd=cmd, launched=True,
                          returncode=out.returncode, summary=finding.output)
-        # 플래그 스캔 — 출력에서 user.txt/root.txt 획득
+        # 플래그 스캔 — 출력에서 user.txt/root.txt 획득. 열거 중 발견한 플래그는
+        # 선행 Foothold(익스플로잇 루프 획득)가 있어야 genuine, 없으면 undemonstrated.
+        earned = bool(self._ledger and
+                      any(not f.startswith("flag:") for f in self._ledger.footholds()))
+        prov = _FLAG_GENUINE if earned else _FLAG_UNDEMONSTRATED
         for hit in scan_flags(cmd, out.stdout):
             if hit.value not in {f.value for f in report.flags}:
+                hit.provenance = prov
                 report.flags.append(hit)
                 finding.note = (finding.note + " " if finding.note else "") + f"🚩 {hit.kind} flag"
                 self.audit.event("flag_found", kind=hit.kind, value=hit.value, cmd=cmd)

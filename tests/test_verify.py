@@ -70,6 +70,16 @@ check("비플래그 맥락의 hex 무시",
       flag("hashid 5f4dcc3b5aa765d61d8327deb882cf99",
            "5f4dcc3b5aa765d61d8327deb882cf99").verdict == "inconclusive")
 
+print("=== flag provenance (ctf-abacus) ===")
+from htb_agent.verify import FLAG_GENUINE, FLAG_UNDEMONSTRATED
+ev_u = flag("cat /home/bob/user.txt", "a" * 32, earned=False)
+check("선행 익스플로잇 없음 → undemonstrated", ev_u.provenance == FLAG_UNDEMONSTRATED)
+check("undemonstrated 근거 명시", "undemonstrated" in ev_u.because or "미증명" in ev_u.because)
+ev_g = flag("cat /home/bob/user.txt", "a" * 32, earned=True)
+check("선행 Foothold 있음 → genuine", ev_g.provenance == FLAG_GENUINE)
+check("genuine 도 confirmed", ev_g.verdict == "confirmed")
+check("기본값은 undemonstrated(보수적)", flag("x user.txt", "b" * 32).provenance == FLAG_UNDEMONSTRATED)
+
 print("=== attempt.py 와의 접합 ===")
 # confirmed 는 foothold 를 들고 와야 Attempt 가 강등하지 않는다
 ev = shell(r)

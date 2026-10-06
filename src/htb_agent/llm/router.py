@@ -169,6 +169,8 @@ class LLMRouter:
             lines.append("탐지된 취약점(서비스→CVE→기존도구):\n  " + "\n  ".join(context["cve"]))
         if context.get("creds"):
             lines.append("확보한 자격증명:\n  " + "\n  ".join(context["creds"]))
+        if context.get("clues"):
+            lines.append("수집된 환경 단서(교차단계 재사용):\n  " + "\n  ".join(context["clues"]))
         if context.get("footholds"):
             lines.append("획득한 접근(Foothold):\n  " + "\n  ".join(context["footholds"]))
         if context.get("dead"):
