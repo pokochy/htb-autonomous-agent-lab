@@ -8,8 +8,10 @@ P1(외부 라이트업/검색 금지)을 지키며 취약점을 다룬다:
   2. 매핑  : '사용자 제공' 취약점 규칙(서비스+버전 → CVE/CWE)으로 관측 서비스를
              매칭. 규칙은 knowledge/vulns/*.json 으로 누적(성장).
 
-안전: 매칭 결과는 '탐지 + 수동 제안(searchsploit 등)'으로만 제시한다. 익스플로잇을
-자동 실행하지 않는다(승인·판단 필요).
+매칭 결과는 익스플로잇 루프(`exploit_loop.py`)의 **후보 생성 컨텍스트**로 쓰인다 —
+LLM 이 어떤 기존 도구(searchsploit·msfconsole·nuclei 등)를 돌릴지 고를 근거다.
+실행은 루프가 검증→범위→승인 3관문(`Gate`)을 거쳐 수행하며, 범위 밖 타격과
+파괴 명령은 scope_guard·command_validator 가 계속 막는다.
 """
 
 from __future__ import annotations

@@ -35,6 +35,10 @@ from .audit import NullAudit
 from .llm.router import LLMRouter
 from .vuln import VulnKB, VulnMatch, extract_vuln_ids
 from .tiering import tier_for
+from .exploit_loop import ExploitLoop, Gate
+from .attempt import Ledger
+from .generators import make_llm_generator, make_flag_generator
+from .flag import FlagHit as _FlagHit
 from .flag import FlagHit, scan as scan_flags
 from .state import SessionState, StateStore, host_to_dict, host_from_dict
 from .tools.runner import Runner
@@ -49,6 +53,9 @@ PENTEST_PHASES: list[tuple[str, str]] = [
     ("lateral", "측면 이동 (Lateral Movement)"),
 ]
 _PHASE_LABEL = dict(PENTEST_PHASES)
+
+# 익스플로잇 루프로 도는 단계(탐지→실행). 나머지(enum)는 순수 열거.
+EXPLOIT_PHASES = {"access", "privesc", "lateral"}
 
 
 @dataclass
@@ -74,6 +81,8 @@ class OrchestrationReport:
     detected_cwe: list[str] = field(default_factory=list)
     vuln_matches: list[VulnMatch] = field(default_factory=list)
     flags: list[FlagHit] = field(default_factory=list)
+    footholds: list[str] = field(default_factory=list)      # 익스플로잇 루프 획득
+    exploit_report: str = ""                                 # 루프 종료 리포트
     message: str = ""
 
     @property
@@ -146,7 +155,10 @@ class Orchestrator:
                  resume: bool = False,
                  audit=None,
                  phases: list[tuple[str, str]] | None = None,
-                 is_tool_available: Callable[[str], bool] | None = None):
+                 is_tool_available: Callable[[str], bool] | None = None,
+                 exploit_max_rounds: int = 8,
+                 exploit_timebox: int = 1800,
+                 exploit_attempt_timebox: int = 180):
         self.guard = guard
         self.runner = runner
         self.kb = kb
@@ -163,6 +175,10 @@ class Orchestrator:
         self.resume = resume
         self.audit = audit or NullAudit()
         self.phases = phases or PENTEST_PHASES
+        self.exploit_max_rounds = exploit_max_rounds
+        self.exploit_timebox = exploit_timebox
+        self.exploit_attempt_timebox = exploit_attempt_timebox
+        self._ledger: Ledger | None = None       # run() 마다 새로, 익스플로잇 단계 공유
         # 도구 설치 여부 판단(주입 가능 — 테스트에서 대체)
         self.is_tool_available = is_tool_available or (lambda b: shutil.which(b) is not None)
 
@@ -209,6 +225,7 @@ class Orchestrator:
         # ── PHASE 3: 모의해킹 단계 '순서대로' 진행 ──
         # enum → access → privesc → lateral 순. 각 단계는 KB(해당 phase)+LLM 적응
         # 라운드를 돌리되, 전역 상한(max_enum·max_llm)·라운드 상한·조기종료로 유한.
+        self._ledger = Ledger()
         seen_cmds: set[str] = set()
         phases_run: list[str] = []
         for key, label in self.phases:
@@ -222,8 +239,15 @@ class Orchestrator:
                                              round_idx=_rnd)
                 if added == 0:
                     break
-            if len(report.enum_findings) + len(report.llm_findings) > phase_before:
+            ran = len(report.enum_findings) + len(report.llm_findings) > phase_before
+            # 침투·권한상승·측면이동은 '탐지→실행' 루프를 추가로 돌린다. 열거(위)는
+            # 그대로 관측을 쌓고, 루프가 그 관측 위에서 기존 도구로 실제 공격을 시도.
+            if key in EXPLOIT_PHASES and self._exploit_phase(report, host, prof, target, key):
+                ran = True
+            if ran:
                 phases_run.append(key)
+            if report.root_flag:          # root 플래그 확보 시 조기 종료
+                break
 
         # ── PHASE 3.7: VULN (CVE/CWE 탐지 + 매핑) ──
         self._run_vuln(report, host, target)
@@ -353,6 +377,71 @@ class Orchestrator:
             self._attempt(report, report.llm_findings, cmd, phase)
             attempted += 1
         return attempted
+
+    # ── 익스플로잇 루프 (access/privesc/lateral) ─────────────────────
+    def _build_generators(self, report: OrchestrationReport, host: NmapHost,
+                          prof: ProfileResult, target: str, phase: str) -> list:
+        """후보 생성원 구성. 기존 도구를 고르는 LLM + 결정적 플래그 캡처."""
+        gens = []
+        if self.llm_router is not None:
+            services = [p.service for p in host.ports if p.state == "open" and p.service]
+            recs = self.kb.query(prof.os_class.value, host.open_ports, services, phase=phase)
+            matches = report.vuln_matches or (self.vuln_kb.match(self._banners(host), target)
+                                              if self.vuln_kb else [])
+            base_context = {
+                "phase": _PHASE_LABEL.get(phase, phase),
+                "profile": prof.summary(),
+                "open_ports": [str(p) for p in host.ports if p.state == "open"],
+                "kb": [f"{r.rule_name}: {', '.join(r.suggestions)}" for r in recs[:5]],
+                "notes": self.kb.notes[:3],
+                "cve": [f"{m.name}: {', '.join(m.cve)} → {', '.join(m.suggest)}"
+                        for m in matches[:5]],
+                "creds": [c.label() for c in (self.vault.creds if self.vault else [])][:5],
+            }
+            gens.append(make_llm_generator(self.llm_router, base_context, target, phase))
+        # 플래그 캡처는 LLM 유무와 무관하게(자격증명/셸이 있으면) 돈다
+        gens.append(make_flag_generator(self.vault, target, prof.os_class.value, phase))
+        return gens
+
+    def _known_surfaces(self, host: NmapHost) -> list[str]:
+        return [f"{p.service or 'svc'}:{p.port}" for p in host.ports if p.state == "open"]
+
+    @staticmethod
+    def _banners(host: NmapHost) -> list[str]:
+        return [p.banner for p in host.ports if p.state == "open" and p.banner]
+
+    def _exploit_phase(self, report: OrchestrationReport, host: NmapHost,
+                       prof: ProfileResult, target: str, phase: str) -> bool:
+        """한 단계를 익스플로잇 루프로 돈다. 공유 원장에 이력이 누적된다."""
+        before = len(self._ledger.attempts())
+        gate = Gate(self.guard, self.approver, hosts_map=self.hosts_map or {},
+                    tool_available=self.is_tool_available)
+        loop = ExploitLoop(gate, self.runner,
+                           generators=self._build_generators(report, host, prof, target, phase),
+                           ledger=self._ledger, probe=self.runner,
+                           attempt_timebox=self.exploit_attempt_timebox,
+                           total_timebox=self.exploit_timebox,
+                           max_rounds=self.exploit_max_rounds, audit=self.audit)
+        self.audit.event("exploit_phase_start", phase=phase)
+        result = loop.run()
+        report.exploit_report = result.report(known_surfaces=self._known_surfaces(host))
+
+        for fh in result.footholds:
+            if not fh.startswith("flag:") and fh not in report.footholds:
+                report.footholds.append(fh)
+        # confirmed flag 시도 → FlagHit (출처 명령 보존)
+        known_vals = {f.value for f in report.flags}
+        for a in self._ledger.attempts():
+            if a.verdict == "confirmed" and (a.foothold or "").startswith("flag:"):
+                val = a.observed
+                if val and val not in known_vals:
+                    known_vals.add(val)
+                    report.flags.append(_FlagHit(value=val, kind=a.foothold.split(":", 1)[1],
+                                                 source=a.commands[0] if a.commands else phase))
+        self.audit.event("exploit_phase_end", phase=phase,
+                         attempts=len(self._ledger.attempts()) - before,
+                         footholds=report.footholds, flags=[f.kind for f in report.flags])
+        return len(self._ledger.attempts()) > before
 
     def _run_vuln(self, report: OrchestrationReport, host: NmapHost, target: str) -> None:
         # 관측 코퍼스: 배너 + 스크립트 + enum/LLM 출력

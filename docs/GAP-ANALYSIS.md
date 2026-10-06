@@ -42,11 +42,14 @@ Hard 를 기준으로 잡아 손해 볼 것이 없다).
 
 ## 2. 구멍 (대회 요구 = VPN·IP 만 주면 플래그까지)
 
-### G1. 익스플로잇 실행이 설계상 제외 — **부분 해결 (이번 커밋)**
+### G1. 익스플로잇 실행이 설계상 제외 — **해결 (orchestrator 배선 완료)**
 
-〔확인〕 `src/htb_agent/vuln.py:11` 주석: *"매칭 결과는 '탐지 + 수동 제안
-(searchsploit 등)'으로만 제시한다"*. CVE 를 찾아도 `searchsploit ...` **문자열을
-출력**하고 끝난다. `user.txt` 는 `--cred` 로 사람이 자격증명을 넣어줘야 도달한다.
+〔이력〕 원래 `vuln.py` 는 *"탐지 + 수동 제안으로만 제시, 자동 실행하지 않는다"*
+였다 — CVE 를 찾아도 `searchsploit ...` 문자열을 출력하고 끝났고, `user.txt` 는
+사람이 `--cred` 로 자격증명을 넣어줘야 도달했다. 이 수비적 자기제한을 제거했다
+(HTB 는 승인된 CTF 이고 scope_guard 가 단일 타깃에 바인딩돼 있다). **범위 밖
+타격과 파괴 명령 차단(scope_guard·command_validator)은 유지** — 이건 자기제한이
+아니라 인가 경계이고, HTB 머신을 브릭하면 리셋 대기로 오히려 손해다.
 
 〔확인〕 하드코딩 CVE 는 7건 — vsftpd 2.3.4 / Apache 2.4.49 / Samba
 is_known_pipename / Heartbleed / EternalBlue / OpenSSH 유저열거. 전형적인 Easy
@@ -74,9 +77,22 @@ is_known_pipename / Heartbleed / EternalBlue / OpenSSH 유저열거. 전형적�
 - **같은 후보가 한 라운드에 두 번 실행됐다.** 생성원과 재시도 큐에서 동시에
   올라와 `inconclusive` 재시도 상한이 절반 속도로 타버렸다. → 라운드 내 hid 중복 제거.
 
-→ **남은 일**: `orchestrator.py` 배선. 지금 루프는 **실제 런에서 돌지 않는다** —
-`access`·`privesc` phase 는 여전히 열거만 하고, `vuln.py` 도 아직 종착점이다.
-후보 생성원(KB 규칙 / CVE / LLM)도 아직 하나도 안 붙었다.
+〔확인〕 **orchestrator 배선 완료** (`tests/test_exploit_wiring.py` 23 passed,
+전체 28 스위트 509 passed). `access`·`privesc`·`lateral` phase 가 열거로 관측을
+쌓은 뒤, 그 위에서 `ExploitLoop` 를 돌린다(공유 `Ledger` 로 Foothold 가 단계
+간 이어진다). root 플래그 확보 시 조기 종료.
+
+후보 생성원은 **기존 도구를 고르는** 방식이다(새 익스플로잇을 짜지 않음):
+- `generators.make_llm_generator` — LLM 이 관측·CVE·죽은 가설을 보고 searchsploit·
+  msfconsole·nuclei·hydra·netexec·impacket·evil-winrm 등 **이미 설치된 도구**를
+  `expected` 와 함께 제안. `LLMRouter.suggest_candidates` 가 `CMD … ||| expected`
+  를 파싱, 규약 밖은 버린다. 막힐수록(라운드↑) 티어 상승(G2-5 연계).
+- `generators.make_flag_generator` — 셸 Foothold 나 자격증명이 생기면 기존 도구로
+  user.txt/root.txt 를 읽는 결정적 후보. LLM 없이도 동작.
+- `vuln.py` 매칭은 종착점에서 **LLM 컨텍스트**로 격하 — "서비스→CVE→기존도구".
+
+→ 남은 것: 실제 HTB 머신 실행(아직 0회), 셸 획득 후 중첩 세션 검증, privesc 열거
+도구(linpeas 등 G4). 자동승인은 `--auto`(scope 기반), 기본은 대화형 승인.
 
 ### G2. 지속 셸·세션 부재 — **해결됨 (이번 커밋)**
 
