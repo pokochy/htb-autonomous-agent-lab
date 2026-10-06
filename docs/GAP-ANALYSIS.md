@@ -117,17 +117,29 @@ is_known_pipename / Heartbleed / EternalBlue / OpenSSH 유저열거. 전형적�
   → EOF 시 셸 자동 교체(`respawns` 카운트), 단 작업디렉토리·환경변수가
   초기화된 사실을 호출측에 **숨기지 않고 보고**.
 
-### G3. 지식베이스가 사실상 빈 상태 — 미해결
+### G3. 지식베이스가 사실상 빈 상태 — **해결 (KB 채움)**
 
-〔확인〕 `knowledge/rules/` 1개(9줄) · `notes/` 1개(2줄) · `vulns/` 1개(10줄).
-오케스트레이터는 "phase KB 규칙 + LLM"으로 도는데 KB 기여가 0 → **사실상 LLM 단독**.
+〔이력〕 원래 `knowledge/rules/` 1개(9줄)뿐, KB 기여가 0 → 사실상 LLM 단독이었다.
 
-→ `docs/KNOWLEDGE-LAYERS.md` 의 L2·L3 를 채우는 것이 비용 대비 효과가 가장 크다.
+〔확인〕 `knowledge/rules/*.json` 6개 파일로 확장 — 전체 룰 **16→58건**. 표준
+방법론(라이트업 아님, SEED_RULES 와 동일 성격): 서비스 열거(MSSQL·MySQL·SNMP·
+NFS·RPC·DNS·SMTP·Redis·RDP), 웹(ffuf·nikto·wpscan·sqlmap·LFI), AD(RID브루트·
+AS-REP·Kerberoast·LDAP덤프·certipy), privesc, lateral. `notes/methodology.md`
+추가. 룰은 enum 라운드 자동실행 + 익스플로잇 루프 LLM 컨텍스트 양쪽에 쓰인다.
+`tests/test_knowledge_content.py` 17 passed 로 콘텐츠 회귀 보호.
 
-### G4. 권한상승 열거 수단 없음 — 미해결
+단계별 커버리지(시드+사용자): enum linux 13 / win_ad 16, access 4 / 9,
+privesc 8 / 9, lateral 2 / 5. 〔추정〕 품질은 실제 머신 측정 전까지 미검증.
 
-〔확인〕 src 전체에 `linpeas`/`winpeas`/`pspy` 참조 **0건**. `privesc` phase 는
-존재하지만 거기서 돌릴 도구가 등록돼 있지 않다. Hard 는 privesc 가 본론이다.
+### G4. 권한상승 열거 수단 없음 — **부분 해결 (KB 경유)**
+
+〔이력〕 원래 src 전체에 `linpeas`/`winpeas`/`pspy` 참조 0건이었다.
+
+〔확인〕 `privesc-linux.json`·`privesc-windows.json` 에 linpeas/winPEAS/pspy/
+PowerUp/accesschk + 설정오류 점검(sudo·SUID·capabilities·cron·토큰권한·서비스·
+AlwaysInstallElevated·저장자격증명)을 KB 규칙으로 등록. privesc phase 에서
+LLM 후보 생성 컨텍스트로 투입된다. 남은 것: 도구 전송·실행의 **중첩 세션**
+검증(셸 획득 후 그 컨텍스트에서 돌리기) — 로컬 셸만 검증됨(G2 미검증 항목).
 
 ### G5. 승인 게이트가 기본 전제 — 부분 해결
 
