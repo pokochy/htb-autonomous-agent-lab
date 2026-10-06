@@ -34,6 +34,7 @@ from .creds import CredentialVault
 from .audit import NullAudit
 from .llm.router import LLMRouter
 from .vuln import VulnKB, VulnMatch, extract_vuln_ids
+from .tiering import tier_for
 from .flag import FlagHit, scan as scan_flags
 from .state import SessionState, StateStore, host_to_dict, host_from_dict
 from .tools.runner import Runner
@@ -217,7 +218,8 @@ class Orchestrator:
                                          self.max_enum - len(report.enum_findings), key)
                 if self.llm_router is not None:
                     added += self._llm_round(report, host, prof, target, seen_cmds,
-                                             self.max_llm - len(report.llm_findings), key)
+                                             self.max_llm - len(report.llm_findings), key,
+                                             round_idx=_rnd)
                 if added == 0:
                     break
             if len(report.enum_findings) + len(report.llm_findings) > phase_before:
@@ -313,10 +315,15 @@ class Orchestrator:
 
     def _llm_round(self, report: OrchestrationReport, host: NmapHost,
                    prof: ProfileResult, target: str,
-                   seen: set[str], budget: int, phase: str = "enum") -> int:
-        """해당 단계의 LLM 제안 한 라운드. 이전 관측을 컨텍스트에 반영(적응)."""
+                   seen: set[str], budget: int, phase: str = "enum",
+                   round_idx: int = 0) -> int:
+        """해당 단계의 LLM 제안 한 라운드. 이전 관측을 컨텍스트에 반영(적응).
+
+        티어는 (단계, 라운드)로 결정한다 — 룰 [2-5]. 열거는 저렴/로컬에서 시작하고
+        막힐수록(round_idx↑) 올린다. floor 는 라우터 기본 티어(사용자 강제값)."""
         if budget <= 0:
             return 0
+        tier = tier_for(phase, round_idx, floor=self.llm_router.default_tier)
         services = [p.service for p in host.ports if p.state == "open" and p.service]
         recs = self.kb.query(prof.os_class.value, host.open_ports, services, phase=phase)
         prior = [f"{f.command} => {f.output}"
@@ -330,10 +337,12 @@ class Orchestrator:
             "findings": prior[-10:],
         }
         try:
-            cmds = self.llm_router.suggest_commands(context, target, max_items=budget)
+            cmds = self.llm_router.suggest_commands(context, target, tier=tier,
+                                                    max_items=budget)
         except Exception as e:  # LLM 백엔드 오류는 전체를 깨지 않는다
             report.manual_suggestions.append(f"(LLM 제안 실패: {e})")
             return 0
+        self.audit.event("llm_round", phase=phase, round=round_idx, tier=tier.value)
         attempted = 0
         for cmd in cmds:
             if cmd in seen:

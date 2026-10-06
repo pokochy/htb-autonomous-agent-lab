@@ -8,6 +8,21 @@ Hard 를 기준으로 잡아 손해 볼 것이 없다).
 
 ---
 
+## 0. 에이전트 룰셋 [2-1]~[2-5] 대응
+
+| 룰 | 상태 | 근거(코드) |
+|---|---|---|
+| **2-1** 외부 라이트업 참고 금지 | 구조적 충족 | 웹/검색 도구가 **아예 없다**(가져올 수단 부재). LLM 시스템 프롬프트가 라이트업 인용 금지. 지식베이스는 로컬 `knowledge/` 뿐. 남은 것은 발표용 *증빙*(G6) |
+| **2-2** 무한 루프 제한 | 충족 | phase 유한 진행 + `max_rounds`·`max_enum`·`max_llm`, 루프의 `total_timebox`·`refute_cap`·`max_retries` |
+| **2-3** 명령어 사전 검증 | 충족 | `command_validator.validate` + `Gate`(검증→범위→승인 3관문). 우회 경로 없음 |
+| **2-4** 출력 파싱·교차검증 | 충족 | `observation/parsers` + `verify.py`(증거 기반 판정, 도구의 success 출력 불신) |
+| **2-5** 난이도별 모델 차등 | 충족(이번 커밋) | `tiering.py` — `tier_for`(단계·막힌정도 → 티어) + `HybridProvider`(로컬 기본, 어려운 호출만 외부 API). `--llm hybrid` |
+
+〔확인〕 2-2·2-3·2-4 는 **이미 구현돼 있었다**(참고 구현에서 계승). 2-5 만
+이번에 실제 라우팅을 채웠다 — 이전엔 티어 인프라만 있고 호출은 고정 티어였다.
+
+---
+
 ## 1. 출발점 (`HyungJinKwon/Blog_Custom_Skin` @ `claude/zen-goldberg-yma7t2`)
 
 〔확인〕 Kali(WSL, Python 3.13.12)에서 `python3 tests/run_all.py` → **22 스위트

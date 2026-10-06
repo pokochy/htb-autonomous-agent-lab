@@ -50,8 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="ENUM/LLM 반복 라운드 수 (기본 2, 무한루프 방지)")
     p.add_argument("--knowledge", default=None,
                    help="지식베이스 디렉토리 (기본 ./knowledge). 사용자 규칙/노트로 성장")
-    p.add_argument("--llm", choices=["none", "claude", "ollama"], default=None,
-                   help="LLM 두뇌 백엔드 (기본 none=규칙기반). claude=Claude API, ollama=로컬")
+    p.add_argument("--llm", choices=["none", "claude", "ollama", "hybrid"], default=None,
+                   help="LLM 백엔드 (기본 none=규칙기반). claude=API, ollama=로컬, "
+                        "hybrid=로컬 기본+어려운 단계만 API(토큰 절감, 룰 2-5)")
     p.add_argument("--llm-tier", choices=["cheap", "standard", "strong"], default=None,
                    help="LLM 티어 (비용/성능)")
     p.add_argument("--state-dir", default=None,
@@ -81,6 +82,12 @@ def _build_llm_router(kind: str, tier_name: str):
     if kind == "claude":
         from .llm.claude_provider import ClaudeProvider
         provider = ClaudeProvider()
+    elif kind == "hybrid":
+        # 로컬(ollama) 기본 + 어려운 단계만 외부(claude) — 룰 [2-5] 토큰 절감.
+        from .llm.ollama_provider import OllamaProvider
+        from .llm.claude_provider import ClaudeProvider
+        from .tiering import HybridProvider
+        provider = HybridProvider(local=OllamaProvider(), external=ClaudeProvider())
     else:
         from .llm.ollama_provider import OllamaProvider
         provider = OllamaProvider()
@@ -121,7 +128,10 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     max_rounds = pick(args.max_rounds, cfg.max_rounds, 2)
     knowledge_dir = pick(args.knowledge, cfg.knowledge_dir, "knowledge")
     llm_kind = pick(args.llm, cfg.llm_backend, "none")
-    llm_tier = pick(args.llm_tier, cfg.llm_tier, "standard")
+    # 기본 'cheap' = 티어 정책(tiering.tier_for)의 하한. 열거는 저렴/로컬에서
+    # 시작하고 단계·난이도에 따라 올라간다(룰 [2-5]). --llm-tier 로 하한을 올리면
+    # 전부 그 티어 이상으로 강제된다.
+    llm_tier = pick(args.llm_tier, cfg.llm_tier, "cheap")
     state_dir = pick(args.state_dir, cfg.state_dir, "state")
 
     # 1) Scope Guard 구성 + 타겟 바인딩
