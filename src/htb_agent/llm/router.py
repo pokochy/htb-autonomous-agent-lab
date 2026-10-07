@@ -126,6 +126,9 @@ class LLMRouter:
     @staticmethod
     def _parse_candidates(text: str, target: str, phase: str,
                           limit: int) -> list[Candidate]:
+        # 지역 임포트: htb_agent/__init__ 이 orchestrator 를 끌어오므로 모듈
+        # 최상단 임포트는 초기화 순서에 의존하게 된다.
+        from ..exploit_loop import parse_expectation
         out: list[Candidate] = []
         seen: set[str] = set()
         for raw in text.splitlines():
@@ -138,7 +141,6 @@ class LLMRouter:
             expected = exp_part.strip()
             if not cmd or not expected or cmd in seen:
                 continue
-            from ..exploit_loop import parse_expectation
             if parse_expectation(expected) is None:    # 규약 밖 expected 는 버린다
                 continue
             # 크리덴셜 플레이스홀더가 남은 명령은 루프 쪽(creds.expand)에서 채운다.

@@ -24,6 +24,7 @@ from typing import Callable
 from .attempt import Candidate
 from .creds import CredentialVault
 from .tiering import tier_for
+from .verify import is_capability
 
 # loop 타입은 런타임 임포트(순환 방지). Generator 시그니처만 맞춘다.
 Generator = Callable[[object], list[Candidate]]
@@ -84,7 +85,8 @@ def make_flag_generator(vault: CredentialVault | None, target: str,
 
     def gen(loop) -> list[Candidate]:
         out: list[Candidate] = []
-        have_shell = any(not f.startswith("flag:") for f in loop.ledger.footholds())
+        # '능력' Foothold 만 — verified:(확인된 사실)로는 대상 셸이 없다.
+        have_shell = any(is_capability(f) for f in loop.ledger.footholds())
 
         # 1) 셸 Foothold 가 있으면 그 셸로 직접 읽는다
         if have_shell:

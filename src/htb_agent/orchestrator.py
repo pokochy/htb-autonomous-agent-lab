@@ -40,7 +40,9 @@ from .attempt import Ledger
 from .generators import make_llm_generator, make_flag_generator
 from .clues import ClueStore
 from .flag import FlagHit as _FlagHit
-from .verify import FLAG_GENUINE as _FLAG_GENUINE, FLAG_UNDEMONSTRATED as _FLAG_UNDEMONSTRATED
+from .verify import (FLAG_GENUINE as _FLAG_GENUINE,
+                     FLAG_UNDEMONSTRATED as _FLAG_UNDEMONSTRATED,
+                     is_capability as _is_capability)
 from .flag import FlagHit, scan as scan_flags
 from .state import SessionState, StateStore, host_to_dict, host_from_dict
 from .tools.runner import Runner
@@ -233,6 +235,7 @@ class Orchestrator:
         # enum → access → privesc → lateral 순. 각 단계는 KB(해당 phase)+LLM 적응
         # 라운드를 돌리되, 전역 상한(max_enum·max_llm)·라운드 상한·조기종료로 유한.
         self._ledger = Ledger()
+        self._clues = ClueStore()        # 원장과 함께 run() 마다 초기화
         seen_cmds: set[str] = set()
         phases_run: list[str] = []
         for key, label in self.phases:
@@ -442,7 +445,7 @@ class Orchestrator:
             self._clues.harvest(a.observed)
 
         for fh in result.footholds:
-            if not fh.startswith("flag:") and fh not in report.footholds:
+            if _is_capability(fh) and fh not in report.footholds:
                 report.footholds.append(fh)
         # confirmed flag 시도 → FlagHit (출처 명령 보존)
         known_vals = {f.value for f in report.flags}
@@ -518,7 +521,7 @@ class Orchestrator:
         # 플래그 스캔 — 출력에서 user.txt/root.txt 획득. 열거 중 발견한 플래그는
         # 선행 Foothold(익스플로잇 루프 획득)가 있어야 genuine, 없으면 undemonstrated.
         earned = bool(self._ledger and
-                      any(not f.startswith("flag:") for f in self._ledger.footholds()))
+                      any(_is_capability(f) for f in self._ledger.footholds()))
         prov = _FLAG_GENUINE if earned else _FLAG_UNDEMONSTRATED
         for hit in scan_flags(cmd, out.stdout):
             if hit.value not in {f.value for f in report.flags}:

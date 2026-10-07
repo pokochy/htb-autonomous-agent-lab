@@ -70,6 +70,41 @@ check("비플래그 맥락의 hex 무시",
       flag("hashid 5f4dcc3b5aa765d61d8327deb882cf99",
            "5f4dcc3b5aa765d61d8327deb882cf99").verdict == "inconclusive")
 
+print("=== 짧은 명령이 출력을 파괴하지 않는다 (거짓 refuted 회귀) ===")
+# 에코 제거를 단순 치환으로 하면 'id' 가 'uid='/'gid=' 안에서 뜯겨나가
+# 성공한 루트 셸이 refuted 로 판정되고, 그 refuted 가 접근면 소진에 쌓인다.
+def out_runner(text):
+    return FakeRunner(lambda c, timeout=120, t=text: RunOutput(c, stdout=t))
+check("probe:id::uid= 가 루트 셸을 인정",
+      confirms(out_runner("uid=0(root) gid=0(root) groups=0(root)"), "id", "uid=").verdict
+      == "confirmed")
+check("관측이 원형 보존",
+      confirms(out_runner("uid=0(root)"), "id", "uid=").observed.startswith("uid=0"))
+check("probe:ls::id_rsa", confirms(out_runner("total 8\nid_rsa"), "ls", "id_rsa").verdict
+      == "confirmed")
+check("probe:ps::systemd", confirms(out_runner("PID CMD\n1 systemd"), "ps", "systemd").verdict
+      == "confirmed")
+check("복합 명령도 보존",
+      confirms(out_runner("uid=1000(bob)"), "cd /tmp && id", "uid=").verdict == "confirmed")
+
+print("=== 에코는 여전히 증거가 아니다 (거짓 confirmed 방지) ===")
+check("순수 에코 줄 → refuted",
+      shell(FakeRunner(lambda c, timeout=120: RunOutput(c, stdout=c))).verdict == "refuted")
+# 프롬프트가 붙어 에코된 줄에만 토큰이 있으면 '돌아온 것'이 아니다
+check("프롬프트+에코 → refuted",
+      shell(FakeRunner(lambda c, timeout=120:
+                       RunOutput(c, stdout=f"root@htb:~# {c}"))).verdict == "refuted")
+check("에코 뒤 실제 출력 → confirmed",
+      shell(FakeRunner(lambda c, timeout=120:
+                       RunOutput(c, stdout=f"{c}\n{c.split()[-1]}"))).verdict == "confirmed")
+
+print("=== is_capability: 능력 vs 확인된 사실 ===")
+from htb_agent.verify import is_capability
+check("셸은 능력", is_capability("www"))
+check("플래그는 능력 아님", not is_capability("flag:user"))
+check("verified: 는 능력 아님", not is_capability("verified:http:80: uid="))
+check("빈 값/None 은 능력 아님", not is_capability("") and not is_capability(None))
+
 print("=== flag provenance (ctf-abacus) ===")
 from htb_agent.verify import FLAG_GENUINE, FLAG_UNDEMONSTRATED
 ev_u = flag("cat /home/bob/user.txt", "a" * 32, earned=False)

@@ -54,6 +54,19 @@ class Evidence:
 FLAG_GENUINE = "genuine"            # 익스플로잇(= 사전 Foothold) 이후 대상에서 관측
 FLAG_UNDEMONSTRATED = "undemonstrated"   # 플래그는 나왔으나 선행 익스플로잇 증거 없음
 
+# Foothold 문자열 접두사 규약. `Attempt` 는 confirmed 에 foothold 를 요구하므로
+# '확인된 사실'도 foothold 칸에 들어간다 — 그걸 '획득한 접근 능력'과 섞으면
+# 배너 하나 확인한 것이 접근 획득으로 보고되고(과장), provenance 의 genuine
+# 판정까지 느슨해진다. 접두사로 구분한다.
+FLAG_PREFIX = "flag:"
+VERIFIED_PREFIX = "verified:"       # 증거로 확인된 '사실'(능력 아님)
+
+
+def is_capability(foothold: str | None) -> bool:
+    """실제로 획득한 접근 능력인가(셸·RCE·인증). 플래그·단순 확인은 아니다."""
+    f = (foothold or "").strip()
+    return bool(f) and not f.startswith((FLAG_PREFIX, VERIFIED_PREFIX))
+
 
 def _call(probe: ProbeLike, command: str, timeout: int) -> RunOutput:
     fn = getattr(probe, "run", probe)
@@ -61,8 +74,32 @@ def _call(probe: ProbeLike, command: str, timeout: int) -> RunOutput:
 
 
 def _without_command(out: str, command: str) -> str:
-    """에코된 명령줄을 걷어낸다 — 명령에 박힌 문자열을 '출력'으로 오인하지 않도록."""
-    return out.replace(command, "")
+    """에코된 명령'줄'만 걷어낸다 — 명령에 박힌 문자열을 '출력'으로 오인하지 않도록.
+
+    단순 문자열 치환(`out.replace(command, "")`)은 양방향으로 틀린다:
+      - **거짓 refuted**: 짧은 명령이 정상 출력 내부의 부분문자열을 파괴한다.
+        `id` 를 걷어내면 `uid=0(root) gid=0(root)` → `u=0(root) g=0(root)` 가
+        되어 `probe:id::uid=` 가 성공한 루트 셸을 반증으로 판정한다. 그 refuted 는
+        접근면 소진 상한에 쌓여 **작동하는 경로를 버리게** 만든다.
+      - **거짓 confirmed**: 프롬프트 접두사가 붙어 에코된 줄
+        (`root@h:~# echo TOKEN`)을 남기면 토큰이 '되돌아온 것'으로 보인다.
+
+    터미널 에코는 '줄' 단위로 돌아오므로, 줄이 명령과 같거나 명령으로 끝날 때만
+    (= 프롬프트 + 에코) 걷어낸다. 출력 중간에 박힌 우연한 일치는 건드리지 않는다.
+    """
+    cmd = command.strip()
+    if not cmd:
+        return out
+    kept: list[str] = []
+    for line in out.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        stripped = line.strip()
+        if stripped == cmd:
+            continue                                  # 순수 에코 줄
+        if stripped.endswith(cmd) and len(stripped) > len(cmd):
+            kept.append(stripped[: -len(cmd)])        # 프롬프트 + 에코 줄
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _tail(text: str, n: int = 300) -> str:
