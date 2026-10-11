@@ -15,19 +15,19 @@ RedCat Hackathon #1 (HTB Machine Agent) 출전 작업 저장소.
 
 ---
 
-## 현재 상태 (2026-10-03)
+## 현재 상태 (2026-10-11)
 
-〔확인〕 Kali(WSL, Python 3.13.12) `python3 tests/run_all.py` →
-**23 스위트 387 passed, 0 failed**.
+〔확인〕 최신 Kali(WSL) 로컬 검사 결과는 아래 테스트 절에 기록한다. 실제 HTB 대상
+실행은 별도 검증으로 구분한다.
 
 | | 상태 |
 |---|---|
 | 정찰·식별·열거·파싱 | 동작 (출발점에서 승계) |
 | 안전·상태·감사·라이트업 | 동작 (출발점에서 승계) |
 | **지속 셸 세션** | **이번에 추가** — `tools/session.py`, 28 테스트 |
-| 익스플로잇 실행 루프 | **없음** ← 최대 공백 |
-| 권한상승 열거 | **없음** |
-| 지식베이스 | 사실상 빈 상태 (3파일 21줄) |
+| 익스플로잇 실행 루프 | 제한적으로 동작 — scope/validator/승인 관문과 시간 상한 적용 |
+| 권한상승 열거 | 규칙 기반 제안과 유한 실행 루프 존재; 실제 HTB 검증은 대기 |
+| 지식베이스 | 단계별 rules·notes·vulnerability mapping을 사용자 자료로 확장 가능 |
 | Writeup 미참조 증빙 | 설계만 |
 
 **실제 HTB 머신 대상 실행은 아직 한 번도 하지 않았다.** 위 수치는 전부
@@ -43,6 +43,9 @@ RedCat Hackathon #1 (HTB Machine Agent) 출전 작업 저장소.
 | [docs/KNOWLEDGE-LAYERS.md](docs/KNOWLEDGE-LAYERS.md) | 지식 계층 L0–L5 (즉석 / 컨텍스트 / 치트시트 / 재분석 / 요약위키 / 대도서관) |
 | [docs/NO-WRITEUP-POLICY.md](docs/NO-WRITEUP-POLICY.md) | 대회 규칙 대응 — 조치·증빙·통제 불가 항목 |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 출발점 구조·흐름 (승계 문서) |
+| [docs/KALI-QUICKSTART.md](docs/KALI-QUICKSTART.md) | VPN 파일 + 할당 IP만으로 시작하는 Kali 실행 경로 |
+| [docs/llm-wiki/README.md](docs/llm-wiki/README.md) | 논문·프레임워크·Claude Skills·AD/AWS·커뮤니티 조사 위키 |
+| [docs/ARTEX.md](docs/ARTEX.md) | 비교군 ARTEX 한국어판 — `bash scripts/artex.sh setup` / `run` → http://localhost:8787 |
 
 ---
 
@@ -56,6 +59,16 @@ sudo openvpn your-htb.ovpn           # tun0 → 공격자 IP 자동탐지
 
 Python 3.10+. 코어는 표준 라이브러리만. 지속 셸은 `pexpect` 필요
 (없으면 one-shot 러너로 자동 강하). LLM 은 `anthropic` 또는 Ollama.
+
+가장 짧은 Kali 실행 경로는 다음과 같다. launcher가 누락 도구와 virtualenv를 준비하고,
+공식 profile로 VPN을 연결한 다음 할당 IP 한 대만 /32 범위로 바인딩한다.
+
+~~~bash
+bash scripts/htb-kali.sh ~/Downloads/htb-lab.ovpn 10.129.1.5
+~~~
+
+제공된 계정, local SearchSploit/NVD 1-day 후보 조회, ARTEX·PentestGPT·BloodHound MCP
+setup 경로는 [Kali 빠른 시작](docs/KALI-QUICKSTART.md)을 따른다.
 
 ```bash
 htb-agent 10.129.1.5 --auto --llm claude --writeup   # 범위내 무승인 + 라이트업
@@ -90,12 +103,15 @@ python3 tests/run_all.py
 네트워크·도구 없이 러너 주입으로 전 로직 검증. `test_session.py` 는 실제 pty 가
 필요해 Linux 에서만 의미가 있고, 그 외 환경에서는 자동으로 건너뛴다.
 
+2026-10-11 Kali WSL에서 **35 스위트, 798 passed, 0 failed**를 확인했다. 이 결과는
+실제 VPN 연결·외부 framework 설치·HTB 대상 실행을 포함하지 않는다.
+
 ---
 
 ## 한계 (과장 금지)
 
-- **익스플로잇을 실행하지 않는다.** 탐지와 수동 제안까지만. 즉 현재 상태로는
-  Hard 머신을 끝까지 풀 수 없다.
+- 1-day 검색은 관측 제품/버전·CVE의 메타데이터 후보만 만든다. 영향 버전·전제조건과
+  실제 관측을 확인하기 전에는 exploit 가능성이나 Hard 머신 성공을 주장하지 않는다.
 - 명령 검증은 형식적 무오류까지만 보장(도구별 옵션 의미는 미보장).
 - OS·취약점 판정은 증거기반 확신도 — 약하면 `〔추정〕` 표기.
 - 지속 셸은 로컬 Kali 에서만 검증. 리버스 셸 경유 중첩 세션은 미검증.

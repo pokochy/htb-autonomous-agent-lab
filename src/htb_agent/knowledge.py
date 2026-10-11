@@ -198,6 +198,10 @@ def _load_notes_dir(path: str) -> list[str]:
     if not os.path.isdir(path):
         return out
     for fn in sorted(os.listdir(path)):
+        # README(폴더 사용법 안내)와 `_` 접두 파일(예시·초안)은 노트가 아니다 — 읽으면
+        # 안내문이 매 LLM 호출에 '사용자 노하우'로 주입되어 토큰만 태운다.
+        if fn.upper().startswith("README") or fn.startswith("_"):
+            continue
         if fn.endswith((".md", ".txt")):
             try:
                 with open(os.path.join(path, fn), encoding="utf-8") as f:

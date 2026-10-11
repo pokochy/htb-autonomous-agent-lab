@@ -27,6 +27,7 @@ class Config:
     max_enum: int | None = None
     max_llm: int | None = None
     max_rounds: int | None = None
+    token_budget: int | None = None
     knowledge_dir: str | None = None
     state_dir: str | None = None
 
@@ -43,6 +44,7 @@ class Config:
             max_enum=d.get("max_enum"),
             max_llm=d.get("max_llm"),
             max_rounds=d.get("max_rounds"),
+            token_budget=d.get("token_budget"),
             knowledge_dir=d.get("knowledge_dir", d.get("knowledge")),
             state_dir=d.get("state_dir"),
         )

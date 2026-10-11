@@ -30,6 +30,10 @@ class LLMResponse:
     completion_tokens: int = 0
     cache_read_tokens: int = 0
     cache_creation_tokens: int = 0
+    # 종료 사유 — 'ok' | 'truncated'(출력/사고가 한도에 막힘) | 'refused'(모델·분류기 거절).
+    # 거절은 HTTP 200 으로 오고 본문이 비어, 확인하지 않으면 "아이디어 없음"으로 오인된다.
+    finish: str = "ok"
+    detail: str = ""        # 거절 분류, ctx_full 등 부가 사유
 
 
 class LLMProvider(ABC):
@@ -44,6 +48,10 @@ class LLMProvider(ABC):
     def available(self) -> tuple[bool, str]:
         """(사용가능?, 사유). 기본 True."""
         return True, "ok"
+
+    def num_ctx_for(self, tier: Tier) -> int | None:
+        """이 티어가 실제로 쓸 컨텍스트 창(알 수 있을 때만). 로컬 모델 예산 산정용."""
+        return None
 
     @abstractmethod
     def complete(self, system: str, user: str,

@@ -14,6 +14,7 @@ HTB 에이전트 CLI 진입점 (Kali 런타임)
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
 
 from .scope_guard import ScopeGuard, ScopeViolation
@@ -36,8 +37,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--attacker-ip", action="append", dest="attacker_ips",
                    help="공격자 VPN IP (반복 가능). 생략 시 tun0 자동탐지")
     p.add_argument("--cred", action="append", dest="creds",
-                   help="자격증명 'user:pass' 또는 'user:pass:domain' (반복 가능). "
-                        "{user}/{pass}/{domain} 제안을 실행 후보로 승격")
+                   help="레거시 자격증명 'user:pass[:domain]' (셸 이력에 남을 수 있음). "
+                        "--username 또는 --credentials-file 권장")
+    p.add_argument("--username", help="제공된 계정. 비밀번호는 숨김 입력으로 받음")
+    p.add_argument("--domain", help="제공된 AD 도메인 (--username과 함께 사용)")
+    p.add_argument("--credentials-file", help="자격증명 JSON 파일(object 또는 list)")
+    p.add_argument("--require-llm", action="store_true",
+                   help="선택 LLM을 사용할 수 없으면 스캔 전에 중단")
     p.add_argument("--config", help="설정 파일(.json/.yaml). 우선순위: CLI > 설정파일 > 기본값")
     p.add_argument("--auto", action="store_true",
                    help="범위내+검증통과 명령 자동승인 (비대화형)")
@@ -55,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "hybrid=로컬 기본+어려운 단계만 API(토큰 절감, 룰 2-5)")
     p.add_argument("--llm-tier", choices=["cheap", "standard", "strong"], default=None,
                    help="LLM 티어 (비용/성능)")
+    p.add_argument("--token-budget", type=int, default=None,
+                   help="과금 모델 누적 토큰 상한(입력+출력+캐시). 넘으면 LLM 호출을 막는다")
+    p.add_argument("--no-one-day", action="store_true",
+                   help="관측된 제품/버전의 로컬 SearchSploit 메타데이터 검색 비활성")
+    p.add_argument("--online-cve", action="store_true",
+                   help="관측된 제품/버전 또는 CVE만 NVD에 1회 조회 (기본은 외부 조회 안 함)")
     p.add_argument("--state-dir", default=None,
                    help="세션 상태 저장 디렉토리 (기본 ./state)")
     p.add_argument("--resume", action="store_true",
@@ -73,7 +85,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _build_llm_router(kind: str, tier_name: str):
+def _build_llm_router(kind: str, tier_name: str, token_budget: int | None = None):
     """LLM 백엔드 구성. 사용 불가면 (None, 사유) 반환."""
     if kind == "none":
         return None, "LLM 미사용(규칙기반)"
@@ -94,7 +106,8 @@ def _build_llm_router(kind: str, tier_name: str):
     ok, reason = provider.available()
     if not ok:
         return None, f"{kind} 사용 불가: {reason}"
-    return LLMRouter(provider, default_tier=Tier(tier_name)), f"{kind}({tier_name})"
+    return (LLMRouter(provider, default_tier=Tier(tier_name), token_budget=token_budget),
+            f"{kind}({tier_name})")
 
 
 def _build_runner(kind: str):
@@ -114,6 +127,27 @@ def _build_runner(kind: str):
 def main(argv: list[str] | None = None, runner=None) -> int:
     # runner 주입 가능(테스트). 주입 없으면 --runner 로 선택.
     args = build_parser().parse_args(argv)
+    if args.domain and not args.username:
+        print("⛔ --domain은 --username과 함께 사용하세요", file=sys.stderr)
+        return 2
+    if args.no_one_day and args.online_cve:
+        print("⛔ --online-cve는 --no-one-day와 함께 사용할 수 없습니다", file=sys.stderr)
+        return 2
+    from .creds import CredentialVault, Credential
+    try:
+        vault = CredentialVault.from_cli(args.creds)
+        if args.credentials_file:
+            for cred in CredentialVault.load_file(args.credentials_file).creds:
+                vault.add(cred)
+        if args.username:
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", getpass.GetPassWarning)
+                password = getpass.getpass("제공된 계정 비밀번호: ")
+            vault.add(Credential(args.username, password, args.domain, source="prompt"))
+    except (ValueError, EOFError, KeyboardInterrupt, getpass.GetPassWarning) as e:
+        print(f"⛔ 자격증명 입력 오류: {e}", file=sys.stderr)
+        return 2
 
     # 0) 설정 파일 로드 + 우선순위 해소 (CLI > config > 기본값)
     from .config import load_config, pick, Config, ConfigError
@@ -133,6 +167,7 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     # 전부 그 티어 이상으로 강제된다.
     llm_tier = pick(args.llm_tier, cfg.llm_tier, "cheap")
     state_dir = pick(args.state_dir, cfg.state_dir, "state")
+    token_budget = pick(args.token_budget, cfg.token_budget, None)
 
     # 1) Scope Guard 구성 + 타겟 바인딩
     guard = ScopeGuard.from_cidr_strings(ranges)
@@ -163,20 +198,22 @@ def main(argv: list[str] | None = None, runner=None) -> int:
           f"취약점 규칙 {len(vuln_kb.rules)}개 로드\n")
 
     # 5) LLM 두뇌 구성(선택)
-    llm_router, llm_status = _build_llm_router(llm_kind, llm_tier)
+    llm_router, llm_status = _build_llm_router(llm_kind, llm_tier, token_budget)
     print(f"LLM: {llm_status}\n")
+    if args.require_llm and llm_router is None:
+        print("⛔ LLM 준비 실패 — API 키/백엔드 설정을 확인하세요", file=sys.stderr)
+        return 2
 
     # 6) 상태 저장소 (중단/재개) + 자격증명 볼트
     from .state import StateStore
-    from .creds import CredentialVault, Credential
     store = None if args.no_save else StateStore(state_dir)
-    vault = CredentialVault.from_cli(args.creds)
     if args.resume and store and store.exists(args.target):
         prior = store.load(args.target)
         if prior:
             print("재개할 저장 상태 발견:\n" + prior.summary() + "\n")
-            for d in prior.credentials:   # 저장된 자격증명 재사용
-                vault.add(Credential.from_dict(d))
+            if prior.credentials:
+                print("저장된 자격증명은 메타데이터만 보관되며 재개 시 복원하지 않습니다. "
+                      "필요하면 --username 또는 --credentials-file로 다시 입력하세요.\n")
     if vault.creds:
         print(f"자격증명 볼트: {[c.label() for c in vault.creds]}\n")
 
@@ -188,8 +225,10 @@ def main(argv: list[str] | None = None, runner=None) -> int:
     else:
         log_path = args.log_file or _os.path.join(
             state_dir, f"audit_{StateStore._safe(args.target)}.jsonl")
-        audit = AuditLog(log_path)
+        audit = AuditLog(log_path, secrets=vault.secret_values())
         print(f"감사 로그: {log_path}\n")
+    from .research import OneDayResearch
+    one_day = None if args.no_one_day else OneDayResearch(online=args.online_cve, audit=audit)
 
     # 7) 오케스트레이션 (유한 단계: RECON→PROFILE→ENUM→(LLM)→REPORT)
     approver = auto_approve_in_scope if args.auto else interactive_approver
@@ -202,8 +241,14 @@ def main(argv: list[str] | None = None, runner=None) -> int:
                                 max_rounds=max_rounds,
                                 llm_router=llm_router, vuln_kb=vuln_kb,
                                 vault=vault if vault.creds else None,
-                                state_store=store, resume=args.resume, audit=audit)
-    report = orchestrator.run()
+                                state_store=store, resume=args.resume, audit=audit,
+                                one_day_research=one_day,
+                                enable_one_day=not args.no_one_day)
+    try:
+        report = orchestrator.run()
+    finally:
+        if hasattr(runner, "close"):
+            runner.close()
     print("\n" + report.summary())
     if llm_router is not None and llm_router.calls:
         print("\n" + llm_router.cost_summary())

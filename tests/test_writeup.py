@@ -29,6 +29,10 @@ g = ScopeGuard.from_cidr_strings(); g.bind_target("10.129.1.10"); g.add_attacker
 r = FakeRunner(lambda c: RunOutput(c, stdout=AD) if c.startswith("nmap") else RunOutput(c, stdout="share: data READ, WRITE"))
 rep = Orchestrator(g, r, KnowledgeBase.load(), auto_approve_in_scope,
                    vuln_kb=VulnKB.load(), is_tool_available=lambda b: True).run()
+rep.one_day_leads = [{
+    "source": "searchsploit", "id": "12345", "title": "Example advisory",
+    "url": "https://www.exploit-db.com/exploits/12345", "status": "unverified-lead",
+}]
 
 md = generate_writeup(rep, attacker_ip="10.10.14.5", machine_name="TestBox")
 
@@ -52,6 +56,7 @@ check("3분할 해설(바이너리)", "바이너리 :" in md)
 print("\n=== 취약점 ===")
 check("CVE 추출 표기", "CVE-2017-0144" in md)
 check("버전 매핑(vsftpd)", "vsftpd" in md.lower())
+check("1-day 후보는 미검증 경계와 함께 기록", "Example advisory" in md and "미검증" in md)
 
 print("\n=== 블루팀 지표(관측 포트 조건) ===")
 check("Kerberos 지표(88 열림)", "4768" in md or "Kerberos" in md)

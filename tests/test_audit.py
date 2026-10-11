@@ -37,6 +37,14 @@ print("\n=== NullAudit no-op ===")
 n = NullAudit(); n.event("x", a=1); n.close()
 check("NullAudit 예외 없음", True)
 
+print("\n=== 비밀 마스킹 ===")
+with tempfile.TemporaryDirectory() as d:
+    secret = "mypass$word"
+    a = AuditLog(os.path.join(d, "redacted.jsonl"), secrets=[secret])
+    a.event("exec", cmd=f"tool -p {secret}", nested={"value": secret})
+    raw = open(a.path, encoding="utf-8").read()
+    check("명령과 중첩 값의 비밀 마스킹", secret not in raw and "[REDACTED]" in raw)
+
 LINUX = """<?xml version="1.0"?><nmaprun><host><status state="up"/>
 <address addr="10.129.1.5"/><ports>
 <port protocol="tcp" portid="80"><state state="open"/><service name="http" product="Apache"/></port>

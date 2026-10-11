@@ -46,7 +46,7 @@
     "name": "AD LDAP 덤프",
     "when": {"os": ["windows_ad"], "ports": [389]},
     "suggest": [
-      "ldapdomaindump -u '{domain}\\{user}' -p '{pass}' ldap://{t} -o ldapdump",
+      "ldapdomaindump -u {domain}\\{user} -p {pass} ldap://{t} -o ldapdump",
       "netexec ldap {t} -u {user} -p {pass} --bloodhound -c all --dns-server {t}"
     ],
     "note": "도메인 객체/권한 그래프. BloodHound 수집으로 공격경로 분석. 자격증명 필요.",

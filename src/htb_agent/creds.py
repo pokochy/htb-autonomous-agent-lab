@@ -6,14 +6,16 @@ Credential Vault — 자격증명 저장·재사용
 {hash} 플레이스홀더를 채워 '수동 제안 → 자동 실행 후보'로 승격시킨다(승인 하).
 침투 후 확보한 계정을 AD 단계로 이어가는 연결고리.
 
-⚠️ 자격증명은 민감정보다. 상태 저장(state/)은 .gitignore 처리되며, 로컬
-권한 확인된 HTB 훈련 용도에 한정한다. LLM 프롬프트에는 기본적으로 넣지 않는다.
+⚠️ 자격증명은 민감정보다. 상태 저장(state/)에는 복원 불가능한 메타데이터만 남기고,
+감사 기록에서는 알려진 비밀값을 가린다. 로컬 권한 확인된 HTB 훈련 용도에 한정하며,
+LLM 프롬프트에는 기본적으로 넣지 않는다.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shlex
 from dataclasses import dataclass
 
 _LEFT = re.compile(r"\{[a-zA-Z_]+\}")
@@ -34,6 +36,11 @@ class Credential:
         return {"username": self.username, "password": self.password,
                 "domain": self.domain, "nt_hash": self.nt_hash, "source": self.source}
 
+    def to_public_dict(self) -> dict:
+        """Resume/audit metadata only; passwords and hashes never reach state."""
+        return {"username": self.username, "domain": self.domain, "source": self.source,
+                "has_password": bool(self.password), "has_nt_hash": bool(self.nt_hash)}
+
     @classmethod
     def from_dict(cls, d: dict) -> "Credential":
         return cls(username=d.get("username", ""), password=d.get("password"),
@@ -48,12 +55,42 @@ class Credential:
 
 def fill(template: str, target: str, cred: Credential) -> tuple[str, bool]:
     """템플릿의 {t} + 자격증명 플레이스홀더를 채운다. (cmd, 완전치환?) 반환."""
-    cmd = template.replace("{t}", target)
-    for ph, attr in _FIELD.items():
-        val = getattr(cred, attr, None)
-        if val:
-            cmd = cmd.replace("{" + ph + "}", val)
-    return cmd, (_LEFT.search(cmd) is None)
+    values = {name: getattr(cred, attr) for name, attr in _FIELD.items()}
+    values["t"] = target
+    quote = ""
+    out = []
+    complete = True
+    index = 0
+    while index < len(template):
+        match = _LEFT.match(template, index)
+        if match:
+            if quote:
+                # User KB rules must keep credential placeholders outside quotes.
+                complete = False
+                out.append(match.group())
+                index = match.end()
+                continue
+            value = values.get(match.group()[1:-1])
+            if value is None:
+                complete = False
+                out.append(match.group())
+            else:
+                out.append(shlex.quote(value))
+            index = match.end()
+            continue
+        char = template[index]
+        if char == "\\" and quote != "'" and index + 1 < len(template):
+            out.append(template[index:index + 2])
+            index += 2
+            continue
+        if char in ("'", '"'):
+            if quote == char:
+                quote = ""
+            elif not quote:
+                quote = char
+        out.append(char)
+        index += 1
+    return "".join(out), complete
 
 
 class CredentialVault:
@@ -82,15 +119,24 @@ class CredentialVault:
 
     @classmethod
     def load_file(cls, path: str) -> "CredentialVault":
+        """JSON object/list; invalid or unreadable input must not silently lose credentials."""
         vault = cls()
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            return vault
-        for d in (data if isinstance(data, list) else [data]):
-            if isinstance(d, dict) and d.get("username"):
-                vault.add(Credential.from_dict(d))
+        except (OSError, UnicodeError, json.JSONDecodeError) as e:
+            raise ValueError("자격증명 JSON 파일을 읽을 수 없습니다") from e
+        rows = data if isinstance(data, list) else [data]
+        if not rows:
+            raise ValueError("자격증명 목록이 비어 있습니다")
+        allowed = {"username", "password", "domain", "nt_hash", "source"}
+        for d in rows:
+            if (not isinstance(d, dict) or set(d) - allowed
+                    or not isinstance(d.get("username"), str) or not d["username"].strip()
+                    or any(v is not None and (not isinstance(v, str) or "\x00" in v)
+                           for v in d.values())):
+                raise ValueError("자격증명 형식 오류: username 및 문자열 필드가 필요합니다")
+            vault.add(Credential.from_dict(d))
         return vault
 
     def expand(self, template: str, target: str,
@@ -117,3 +163,15 @@ class CredentialVault:
 
     def to_list(self) -> list[dict]:
         return [c.to_dict() for c in self.creds]
+
+    def to_public_list(self) -> list[dict]:
+        return [c.to_public_dict() for c in self.creds]
+
+    def secret_values(self) -> list[str]:
+        return [value for cred in self.creds
+                for value in (cred.password, cred.nt_hash) if value]
+
+    def redact(self, text: str) -> str:
+        for secret in sorted(self.secret_values(), key=len, reverse=True):
+            text = text.replace(secret, "[REDACTED]")
+        return text

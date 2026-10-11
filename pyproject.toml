@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 claude = ["anthropic>=0.40"]
+session = ["pexpect>=4.9"]
 config = ["pyyaml>=6.0"]
 
 [project.scripts]

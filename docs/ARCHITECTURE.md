@@ -83,8 +83,9 @@ LLM 이 제안한 명령도 '신뢰하지 않는 데이터'로 간주되어 이 
 ## 5. 데이터·성장·운영 저장소
 
 - **학습데이터(성장)**: `knowledge/rules/*.json`(단계별 액션) · `notes/*.md`(노하우) ·
-  `vulns/*.json`(버전→CVE). 파일을 추가할수록 제안이 풍부해진다. 외부 검색 없음.
-- **세션 상태**: `state/<타겟>.json` — 포트·OS·발견·크리덴셜·플래그·이력 (중단/재개).
+  `vulns/*.json`(버전→CVE). 파일을 추가할수록 제안이 풍부해진다. KB 로드 자체에는
+  외부 검색이 없으며, 별도 1-day 메타데이터 조회는 `research.py`와 CLI 옵션으로 분리한다.
+- **세션 상태**: `state/<타겟>.json` — 포트·OS·발견·자격증명 메타데이터·플래그·이력 (중단/재개).
 - **감사 로그**: `state/audit_<타겟>.jsonl` — 모든 제안·검증·승인·실행·플래그.
 - (모두 `.gitignore` 처리 — 로컬·민감정보)
 
@@ -98,8 +99,9 @@ sudo ./scripts/install_tools.sh                 # Kali 보안 도구 일괄 설�
 pip install -e .                                # 에이전트 설치 → 'htb-agent' 명령
 htb-agent 10.129.1.5                            # 승인제 풀이
 htb-agent 10.129.1.5 --auto \
-  --cred administrator:Passw0rd \               # 자격증명 → access/flag 승격
+  --username administrator --domain corp.local \
   --llm claude --writeup                        # LLM 두뇌 + 라이트업 생성
+# password는 실행 시 숨김 입력
 htb-agent 10.129.1.5 --resume                   # 중단 지점 재개
 ```
 
@@ -110,7 +112,7 @@ htb-agent 10.129.1.5 --resume                   # 중단 지점 재개
 ## 7. 테스트
 
 ```bash
-cd htb-agent && python3 tests/run_all.py        # 22 스위트 359 테스트
+cd htb-agent && python3 tests/run_all.py        # 35 스위트 798 테스트 (2026-10-11)
 ```
 
 네트워크·도구 없이도 **러너 주입**으로 전 로직 검증하며, 통합 테스트는 `main()` 을

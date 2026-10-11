@@ -32,6 +32,7 @@ from .target_profiler import ProfileResult
 from .knowledge import KnowledgeBase
 from .creds import CredentialVault
 from .audit import NullAudit
+from .research import OneDayResearch
 from .llm.router import LLMRouter
 from .vuln import VulnKB, VulnMatch, extract_vuln_ids
 from .tiering import tier_for
@@ -46,6 +47,7 @@ from .verify import (FLAG_GENUINE as _FLAG_GENUINE,
 from .flag import FlagHit, scan as scan_flags
 from .state import SessionState, StateStore, host_to_dict, host_from_dict
 from .tools.runner import Runner
+from .tools.registry import TOOLS
 from .tools.recon import ReconExecutor, ReconReport, auto_approve_in_scope, Approver
 
 
@@ -84,6 +86,8 @@ class OrchestrationReport:
     detected_cve: list[str] = field(default_factory=list)
     detected_cwe: list[str] = field(default_factory=list)
     vuln_matches: list[VulnMatch] = field(default_factory=list)
+    one_day_leads: list[dict] = field(default_factory=list)
+    one_day_warnings: list[str] = field(default_factory=list)
     flags: list[FlagHit] = field(default_factory=list)
     footholds: list[str] = field(default_factory=list)      # 익스플로잇 루프 획득
     exploit_report: str = ""                                 # 루프 종료 리포트
@@ -130,6 +134,12 @@ class OrchestrationReport:
                     lines.append(f"       비고: {m.note}")
                 for s in m.suggest:
                     lines.append(f"       제안: {s}")
+        if self.one_day_leads or self.one_day_warnings:
+            lines.append("\n## 1-day 후보 (메타데이터 검색 — 취약 여부·실행 가능성 미검증)")
+            for lead in self.one_day_leads:
+                lines.append(f"  · {lead['source']} {lead['id']}: {lead['title']} ({lead['url']})")
+            for warning in self.one_day_warnings:
+                lines.append(f"  ⚠️ {warning}")
         if self.flags:
             lines.append("\n## 🚩 플래그 (FLAG)")
             lines.append(f"  user.txt: {self.user_flag or '미획득'}")
@@ -166,7 +176,9 @@ class Orchestrator:
                  is_tool_available: Callable[[str], bool] | None = None,
                  exploit_max_rounds: int = 8,
                  exploit_timebox: int = 1800,
-                 exploit_attempt_timebox: int = 180):
+                 exploit_attempt_timebox: int = 180,
+                 one_day_research: OneDayResearch | None = None,
+                 enable_one_day: bool = True):
         self.guard = guard
         self.runner = runner
         self.kb = kb
@@ -182,14 +194,35 @@ class Orchestrator:
         self.state_store = state_store
         self.resume = resume
         self.audit = audit or NullAudit()
+        if vault is not None and hasattr(self.audit, "add_secrets"):
+            self.audit.add_secrets(vault.secret_values())
+        self._redact = vault.redact if vault is not None else (lambda value: value)
+        self.one_day_research = (
+            one_day_research or OneDayResearch(audit=self.audit)
+        ) if enable_one_day else None
+        if self.one_day_research and isinstance(getattr(self.one_day_research, "audit", None), NullAudit):
+            self.one_day_research.audit = self.audit
+        # 라우터의 ctx_build·llm_call·거절 이벤트가 같은 감사 로그에 남게 한다
+        if llm_router is not None and isinstance(getattr(llm_router, "audit", None), NullAudit):
+            llm_router.audit = self.audit
         self.phases = phases or PENTEST_PHASES
         self.exploit_max_rounds = exploit_max_rounds
         self.exploit_timebox = exploit_timebox
         self.exploit_attempt_timebox = exploit_attempt_timebox
         self._ledger: Ledger | None = None       # run() 마다 새로, 익스플로잇 단계 공유
         self._clues = ClueStore()                 # 환경 단서 누적(교차단계 재사용)
+        self._seen_cmds: set[str] = set()         # 열거 단계가 이미 돌린 명령(KB 제안 중복 제거용)
+        self._tools_cache: list[str] | None = None
         # 도구 설치 여부 판단(주입 가능 — 테스트에서 대체)
         self.is_tool_available = is_tool_available or (lambda b: shutil.which(b) is not None)
+
+    def _installed_tools(self) -> list[str]:
+        """설치된 도구 이름(런당 1회). 모델이 없는 도구를 지어내 호출을 낭비하지 않게
+        정적 시스템 프롬프트에 실린다(~150토큰, 접두사 캐시 대상)."""
+        if self._tools_cache is None:
+            self._tools_cache = sorted(t.key for t in TOOLS
+                                       if any(self.is_tool_available(b) for b in t.binaries))
+        return self._tools_cache
 
     def run(self) -> OrchestrationReport:
         if self.guard.bound_target is None:
@@ -230,13 +263,18 @@ class Orchestrator:
         report.profile = prof
         self.audit.event("profile", os=prof.os_class.value, confidence=prof.confidence,
                          is_dc=prof.is_domain_controller)
+        # Nmap script output can already contain a CVE. Query it before broad
+        # product/version metadata so the one bounded NVD request prefers it.
+        self._run_vuln(report, host, target)
+        if self.one_day_research:
+            self._run_one_day(report, host, report.detected_cve)
 
         # ── PHASE 3: 모의해킹 단계 '순서대로' 진행 ──
         # enum → access → privesc → lateral 순. 각 단계는 KB(해당 phase)+LLM 적응
         # 라운드를 돌리되, 전역 상한(max_enum·max_llm)·라운드 상한·조기종료로 유한.
         self._ledger = Ledger()
         self._clues = ClueStore()        # 원장과 함께 run() 마다 초기화
-        seen_cmds: set[str] = set()
+        seen_cmds = self._seen_cmds = set()
         phases_run: list[str] = []
         for key, label in self.phases:
             phase_before = len(report.enum_findings) + len(report.llm_findings)
@@ -261,6 +299,8 @@ class Orchestrator:
 
         # ── PHASE 3.7: VULN (CVE/CWE 탐지 + 매핑) ──
         self._run_vuln(report, host, target)
+        if self.one_day_research:
+            self._run_one_day(report, host, report.detected_cve)
 
         # NSE 취약점 스크립트 보수적 제안(실행은 무겁고 길어 수동 제안으로)
         if host.open_ports:
@@ -307,7 +347,20 @@ class Orchestrator:
         if report.detected_cwe:
             st.detected_cwe = report.detected_cwe
         if self.vault is not None and self.vault.creds:
-            st.credentials = self.vault.to_list()
+            st.credentials = self.vault.to_public_list()
+        elif st.credentials:
+            # Rewrite pre-redaction state files on the next successful run.
+            st.credentials = [
+                {
+                    "username": row.get("username", "") if isinstance(row.get("username"), str) else "",
+                    "domain": row.get("domain") if isinstance(row.get("domain"), str) else None,
+                    "source": row.get("source", "legacy-state")
+                    if isinstance(row.get("source", "legacy-state"), str) else "legacy-state",
+                    "has_password": bool(row.get("has_password") or row.get("password")),
+                    "has_nt_hash": bool(row.get("has_nt_hash") or row.get("nt_hash")),
+                }
+                for row in st.credentials if isinstance(row, dict)
+            ]
         if report.flags:
             st.flags = [{"value": f.value, "kind": f.kind, "source": f.source}
                         for f in report.flags]
@@ -369,6 +422,8 @@ class Orchestrator:
             "kb": [f"{r.rule_name}: {', '.join(r.suggestions)}" for r in recs[:5]],
             "notes": self.kb.notes[:3],
             "findings": prior[-10:],
+            "tools": self._installed_tools(),
+            "research": self._research_context(report),
         }
         try:
             cmds = self.llm_router.suggest_commands(context, target, tier=tier,
@@ -403,14 +458,24 @@ class Orchestrator:
             recs = self.kb.query(prof.os_class.value, host.open_ports, services, phase=phase)
             matches = report.vuln_matches or (self.vuln_kb.match(self._banners(host), target)
                                               if self.vuln_kb else [])
+            # 이미 돌린 제안은 KB 에서 뺀다 — 열거 라운드가 자동 실행한 명령을 컨텍스트에
+            # 다시 실어 모델이 그대로 되풀이하게 만드는 낭비를 막는다.
+            kb_lines = []
+            for r in recs:
+                cmds = [self.kb.format_suggestion(t, target)[0] for t in r.suggestions]
+                if all(c in self._seen_cmds or self._ledger.already_ran(c) for c in cmds):
+                    continue
+                kb_lines.append(f"{r.rule_name}: {' ; '.join(cmds[:2])}")
             base_context = {
                 "phase": _PHASE_LABEL.get(phase, phase),
                 "profile": prof.summary(),
                 "open_ports": [str(p) for p in host.ports if p.state == "open"],
-                "kb": [f"{r.rule_name}: {', '.join(r.suggestions)}" for r in recs[:5]],
+                "kb": kb_lines[:8],
                 "notes": self.kb.notes[:3],
+                "tools": self._installed_tools(),
                 "cve": [f"{m.name}: {', '.join(m.cve)} → {', '.join(m.suggest)}"
                         for m in matches[:5]],
+                "research": self._research_context(report),
                 "creds": [c.label() for c in (self.vault.creds if self.vault else [])][:5],
                 "clues": self._clues.context_lines(),
             }
@@ -435,12 +500,15 @@ class Orchestrator:
         loop = ExploitLoop(gate, self.runner,
                            generators=self._build_generators(report, host, prof, target, phase),
                            ledger=self._ledger, probe=self.runner,
+                           vault=self.vault, target=target,   # 플레이스홀더 확장·{t} 치환
+                           # channel 은 비어 있다: 대상 안의 셸 채널이 아직 없다(미구현).
+                           # 그래서 shell: 후보는 실행되지 않고 probe: 로만 접근을 증명한다.
                            attempt_timebox=self.exploit_attempt_timebox,
                            total_timebox=self.exploit_timebox,
                            max_rounds=self.exploit_max_rounds, audit=self.audit)
         self.audit.event("exploit_phase_start", phase=phase)
         result = loop.run()
-        report.exploit_report = result.report(known_surfaces=self._known_surfaces(host))
+        report.exploit_report = self._redact(result.report(known_surfaces=self._known_surfaces(host)))
         for a in self._ledger.attempts():      # 루프 관측에서 단서 수집(다음 단계용)
             self._clues.harvest(a.observed)
 
@@ -455,7 +523,7 @@ class Orchestrator:
                 if val and val not in known_vals:
                     known_vals.add(val)
                     report.flags.append(_FlagHit(value=val, kind=a.foothold.split(":", 1)[1],
-                                                 source=a.commands[0] if a.commands else phase,
+                                                 source=self._redact(a.commands[0]) if a.commands else phase,
                                                  provenance=a.provenance))
         self.audit.event("exploit_phase_end", phase=phase,
                          attempts=len(self._ledger.attempts()) - before,
@@ -481,42 +549,62 @@ class Orchestrator:
         if self.vuln_kb is not None:
             report.vuln_matches = self.vuln_kb.match(banners, target)
 
+    def _run_one_day(self, report: OrchestrationReport, host: NmapHost,
+                     cves: list[str] | None = None) -> None:
+        """Search only observed product/version or CVE metadata, never target identity."""
+        try:
+            report.one_day_leads = list(self.one_day_research.collect(host, cves))
+            report.one_day_warnings = list(self.one_day_research.warnings)
+        except Exception as e:
+            report.one_day_warnings.append("1-day 검색 실패")
+            self.audit.event("research_query", source="local", status="failed",
+                             error=type(e).__name__)
+
+    def _research_context(self, report: OrchestrationReport) -> list[str]:
+        if self.one_day_research is None:
+            return []
+        if hasattr(self.one_day_research, "context_lines"):
+            return self.one_day_research.context_lines()
+        return [f"UNVERIFIED {r.get('id', '?')}: {r.get('title', '')}"
+                for r in report.one_day_leads[:10]]
+
     def _attempt(self, report: OrchestrationReport, findings: list[EnumFinding],
                  cmd: str, phase: str = "enum") -> None:
-        finding = EnumFinding(command=cmd, phase=phase)
+        finding = EnumFinding(command=self._redact(cmd), phase=phase)
         findings.append(finding)
-        self.audit.event("proposed", cmd=cmd, phase=phase)
+        self.audit.event("proposed", cmd=self._redact(cmd), phase=phase)
 
         binary = binary_of(cmd)
         if binary and not self.is_tool_available(binary):
             finding.note = f"건너뜀: '{binary}' 미설치"
-            self.audit.event("skipped", cmd=cmd, reason="tool-missing", binary=binary)
+            self.audit.event("skipped", cmd=self._redact(cmd), reason="tool-missing", binary=binary)
             return
         vrep: ValidationReport = validate(cmd)
         if not vrep.ok:
             finding.note = "검증 실패: " + "; ".join(str(i) for i in vrep.errors)
-            self.audit.event("rejected", cmd=cmd, stage="validate",
+            self.audit.event("rejected", cmd=self._redact(cmd), stage="validate",
                              errors=[str(i) for i in vrep.errors])
             return
         try:
             sres: CommandScopeResult = self.guard.inspect_command(cmd, hosts_map=self.hosts_map)
         except ScopeViolation as e:
             finding.note = f"범위 오류: {e}"
-            self.audit.event("rejected", cmd=cmd, stage="scope", reason=str(e))
+            self.audit.event("rejected", cmd=self._redact(cmd), stage="scope", reason=str(e))
             return
         if not self.approver(cmd, vrep, sres):
             finding.note = "미승인(범위밖/사용자 거부)"
-            self.audit.event("denied", cmd=cmd, in_scope=sres.auto_allowed)
+            self.audit.event("denied", cmd=self._redact(cmd), in_scope=sres.auto_allowed)
             return
 
         out = self.runner.run(cmd, timeout=180)
         finding.ran = out.launched
         if not out.launched:
             finding.note = f"실행 실패: {out.error}"
-            self.audit.event("executed", cmd=cmd, launched=False, error=out.error)
+            self.audit.event("executed", cmd=self._redact(cmd), launched=False,
+                             error=self._redact(out.error))
             return
-        finding.output = summarize_tool_output(cmd, out.stdout, out.stderr)
-        self.audit.event("executed", cmd=cmd, launched=True,
+        finding.output = self._redact(summarize_tool_output(cmd, out.stdout, out.stderr))
+        self.audit.event("executed", cmd=self._redact(cmd), launched=True,
                          returncode=out.returncode, summary=finding.output)
         # 플래그 스캔 — 출력에서 user.txt/root.txt 획득. 열거 중 발견한 플래그는
         # 선행 Foothold(익스플로잇 루프 획득)가 있어야 genuine, 없으면 undemonstrated.
@@ -528,4 +616,5 @@ class Orchestrator:
                 hit.provenance = prov
                 report.flags.append(hit)
                 finding.note = (finding.note + " " if finding.note else "") + f"🚩 {hit.kind} flag"
-                self.audit.event("flag_found", kind=hit.kind, value=hit.value, cmd=cmd)
+                self.audit.event("flag_found", kind=hit.kind, value=hit.value,
+                                 cmd=self._redact(cmd))

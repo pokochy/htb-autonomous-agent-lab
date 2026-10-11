@@ -16,6 +16,9 @@ Claude 한 곳이라도 열거는 haiku, 권한상승은 opus 로 갈라져 비�
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
+
 from .llm.base import LLMProvider, LLMResponse, Tier
 
 _ORDER = (Tier.CHEAP, Tier.STANDARD, Tier.STRONG)
@@ -29,6 +32,70 @@ _PHASE_BASE = {
     "privesc": Tier.STANDARD,
     "lateral": Tier.STANDARD,
 }
+
+
+# ──────────────────────────────────────────────────────────────────
+# 모델 능력 프로필 — '어떤 모델이 들어와도' 프롬프트를 그 모델에 맞춘다
+# ──────────────────────────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class ModelProfile:
+    klass: str      # high | mid | low
+    target: int     # 프롬프트 목표 토큰(소프트). 이만큼 '채우는' 게 아니라 넘지 않는 선
+    ceiling: int    # 하드 상한 — 시스템 프롬프트 포함
+    items: int      # 한 번에 요청할 후보 수
+    fewshot: int    # 시스템 프롬프트에 넣을 형식 예시 수(약할수록 많이)
+    max_out: int    # 응답 max_tokens (Claude 는 사고 토큰 포함 — 넉넉히)
+    scale: float    # 섹션별 항목 수 스케일 (target / 4000)
+
+
+# (target, ceiling, items, fewshot, max_out) — 1M 창에서도 '필요한 만큼만' 넣는다:
+# 비용은 입력 토큰에 선형이고, 긴 컨텍스트는 정확도도 떨어뜨린다. 한 번의 후보 생성에
+# 필요한 신호(상태 요약·KB 상위·최근 관측·죽은 가설)는 3~4k 토큰이면 충분하다.
+_CLASSES = {
+    "high": (4000, 8000, 5, 0, 8000),
+    "mid":  (3000, 6000, 4, 2, 8000),
+    "low":  (2000, 4000, 3, 3, 1536),
+}
+_REASONING = re.compile(r"deepseek-r1|qwq|qwen3|gpt-oss|magistral|think|reason", re.I)
+_MOE = re.compile(r"(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)b", re.I)
+_PARAMS = re.compile(r"(\d+(?:\.\d+)?)b\b", re.I)
+
+
+def _param_billions(name: str) -> float:
+    m = _MOE.search(name)
+    if m:
+        return float(m.group(1)) * float(m.group(2))
+    m = _PARAMS.search(name)
+    return float(m.group(1)) if m else 0.0
+
+
+def profile_for(model: str, num_ctx: int | None = None) -> ModelProfile:
+    """모델명 → 능력 등급 → 프롬프트 예산. 알 수 없으면 보수적으로 low.
+
+    '소넷급 로컬'은 파라미터 수(≥30B)로 mid 로 잡는다. 로컬은 창(num_ctx)이 작아
+    목표를 창의 35%, 상한을 60% 로 묶고 나머지를 출력·여유로 남긴다.
+    """
+    m = (model or "").lower()
+    local = not m.startswith("claude")
+    if not local:
+        if re.search(r"opus|fable|mythos", m):
+            klass = "high"
+        elif "haiku" in m:
+            klass = "low"
+        else:
+            klass = "mid"            # sonnet 및 알 수 없는 claude-*
+    else:
+        klass = "mid" if _param_billions(m) >= 30 else "low"
+    target, ceiling, items, fewshot, max_out = _CLASSES[klass]
+    if local:
+        if _REASONING.search(m):
+            max_out = max(max_out, 4096)     # 사고형은 <think> 로 출력이 길다
+        if num_ctx:
+            ceiling = min(ceiling, int(num_ctx * 0.6))
+            target = min(target, int(num_ctx * 0.35))
+            max_out = min(max_out, max(256, num_ctx - ceiling))
+    return ModelProfile(klass, target, ceiling, items, fewshot, max_out, target / 4000)
 
 
 def _rank(t: Tier) -> int:
@@ -68,13 +135,20 @@ class HybridProvider(LLMProvider):
 
     @property
     def models(self) -> dict:  # type: ignore[override]
-        # 비용/표시는 실제 응답의 model 로 처리한다. 여기선 참고용 병합만.
+        # 참고용 병합(표시 전용). '이 티어를 누가 처리하나'는 model_for 가 답한다.
         merged: dict = {}
-        if self.local:
-            merged.update(self.local.models)
-        if self.external:
-            merged.update(self.external.models)
+        for p in (self.local, self.external):
+            if p:
+                merged.update(p.models)
         return merged
+
+    def model_for(self, tier: Tier) -> str:
+        # 병합 dict 는 외부가 로컬을 덮어써, CHEAP 이 로컬로 라우팅되는데도 Claude 모델명을
+        # 돌려줬다 — 프롬프트 예산이 엉뚱한 모델 기준으로 잡힌다. 1순위 프로바이더가 답한다.
+        return self._route(tier)[0].model_for(tier)
+
+    def num_ctx_for(self, tier: Tier) -> int | None:
+        return self._route(tier)[0].num_ctx_for(tier)
 
     def available(self) -> tuple[bool, str]:
         avail = []

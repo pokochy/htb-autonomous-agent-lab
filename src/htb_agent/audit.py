@@ -34,8 +34,9 @@ class NullAudit:
 
 
 class AuditLog:
-    def __init__(self, path: str):
+    def __init__(self, path: str, secrets: list[str] | None = None):
         self.path = path
+        self._secrets = tuple(sorted({s for s in (secrets or []) if s}, key=len, reverse=True))
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
@@ -45,9 +46,26 @@ class AuditLog:
         rec.update(data)
         try:
             with open(self.path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                f.write(json.dumps(self._redact(rec), ensure_ascii=False) + "\n")
         except OSError:
             pass  # 로깅 실패가 본 작업을 막지 않는다
 
     def close(self) -> None:
         self.event("session_end_marker")
+
+    def add_secrets(self, secrets: list[str]) -> None:
+        self._secrets = tuple(sorted({*self._secrets, *(s for s in secrets if s)},
+                                     key=len, reverse=True))
+
+    def _redact(self, value):
+        if isinstance(value, str):
+            for secret in self._secrets:
+                value = value.replace(secret, "[REDACTED]")
+            return value
+        if isinstance(value, dict):
+            return {key: self._redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._redact(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact(item) for item in value)
+        return value

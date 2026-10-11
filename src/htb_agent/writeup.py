@@ -144,6 +144,7 @@ def generate_writeup(report, machine_name: str = "<머신명>",
         for s in m.suggest:
             vuln_lines.append(f"  - 제안: `{s}`")
     vuln_block = "\n".join(vuln_lines) or "_(명시적 CVE/CWE 미탐지 — 수동 분석 필요)_"
+    one_day_block = _one_day_block(report)
 
     foothold = []
     for m in report.vuln_matches:
@@ -184,6 +185,10 @@ def generate_writeup(report, machine_name: str = "<머신명>",
 
 {vuln_block}
 
+### 3.1 1-day 메타데이터 후보
+
+{one_day_block}
+
 ## 4. 공격 시나리오 요약
 
 {_scenario_table(report)}
@@ -222,6 +227,20 @@ def _enum_section(report) -> str:
         if f.ran and f.output:
             lines.append(f"- `{f.command}`\n  - {f.output}")
     return "\n".join(lines) or "_(자동 열거 결과 없음 — 실제 실행 시 채워짐)_"
+
+
+def _one_day_block(report) -> str:
+    """Public advisory metadata is evidence to verify, never an execution instruction."""
+    lines = []
+    for lead in getattr(report, "one_day_leads", [])[:10]:
+        source = str(lead.get("source", "source"))
+        identifier = str(lead.get("id", "?"))
+        title = " ".join(str(lead.get("title", "")).split())[:180]
+        url = str(lead.get("url", ""))
+        lines.append(f"- **미검증 {source} 후보** `${identifier}`: {title} ({url})")
+    for warning in getattr(report, "one_day_warnings", []):
+        lines.append(f"- ⚠️ {warning}")
+    return "\n".join(lines) or "_(후보 없음 — 로컬 SearchSploit 또는 관측 CVE를 수동 확인)_"
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -294,6 +313,7 @@ def generate_tistory(report, machine_name: str = "<머신명>",
     for m in report.vuln_matches:
         vuln_lines.append(f"- [{m.severity}] {m.name} ({' '.join(m.cve + m.cwe)}) — {m.note}")
     vuln_block = "\n".join(vuln_lines) or "_(명시적 CVE/CWE 미탐지)_"
+    one_day_block = _one_day_block(report)
 
     return f"""# [{machine_name}] 보안 분석 — 포트부터 탐지까지
 
@@ -320,6 +340,9 @@ def generate_tistory(report, machine_name: str = "<머신명>",
 
 ## 7. 취약점 분석 (CVE / CWE)
 {vuln_block}
+
+### 1-day 메타데이터 후보
+{one_day_block}
 
 ## 8. 고급 명령 조합 예시
 {_advanced_combos(report.host, report.target)}

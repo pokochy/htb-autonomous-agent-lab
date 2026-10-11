@@ -17,6 +17,7 @@ attempt — 가설·시도 원장 (익스플로잇 루프의 기반)
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 
@@ -42,6 +43,10 @@ class Candidate:
     est_seconds: int = 60
     source: str = "kb"              # kb | cve | llm
     hid: str = ""
+    # 성공이 확인되면 얻는 '접근 능력'(예: webshell, ssh-bob). 비어 있으면 확인된
+    # '사실'일 뿐이라 Foothold 로 치지 않는다 — 배너 한 줄 확인이 접근 획득으로
+    # 보고되고 플래그가 genuine 으로 둔갑하는 것을 막는다.
+    grants: str = ""
 
     def __post_init__(self) -> None:
         if not self.expected.strip():
@@ -53,6 +58,9 @@ class Candidate:
             raise CandidateError("surface 미지정")
         if not self.hid:
             self.hid = "h" + uuid.uuid4().hex[:8]
+        # grants 는 LLM 이 쓴 문자열(신뢰 불가). 콜론을 제거해 `flag:`·`verified:`
+        # 접두사로 능력을 위장하지 못하게 한다 — is_capability() 가 이 접두사로 판별.
+        self.grants = re.sub(r"[^\w.-]", "", self.grants or "")[:40]
 
 
 @dataclass
